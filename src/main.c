@@ -37,6 +37,7 @@
 #include "statistics.h"
 #include "indication.h"
 #include "telemetry.h"
+#include "device.h"
 #include "utils.h"
 #ifdef MULTI_WAKEUP
 #include "lib/common/sleep_api.h"
@@ -140,6 +141,47 @@ void assert_printf(char *msg, int line, char *file){
     for (;;) {}
 }
 
+static uint32_t firmware_build_hash( void ){
+    uint32_t hash = 0x811C9DC5;
+    const char *s = FW_FULL_VERSION;
+
+    while (*s) {
+        hash ^= (uint8_t)(*s++);
+        hash *= 0x01000193;
+    }
+
+    if (hash == 0) {
+        hash = 1;
+    }
+
+    return hash;
+}
+
+static bool firmware_check_updated_and_reset( void ){
+    int32_t stored_hash = 0;
+    uint32_t current_hash = firmware_build_hash();
+
+    configdb_get_i32("fw_build_hash", &stored_hash);
+
+    if ((uint32_t)stored_hash != current_hash) {
+
+        os_printf("FW update detected\n");
+        os_printf("old hash = 0x%08X\n", (uint32_t)stored_hash);
+        os_printf("new hash = 0x%08X\n", current_hash);
+
+        ota_reset_to_default();
+        configdb_init();
+        stored_hash = (int32_t)current_hash;
+        configdb_set_i32("fw_build_hash", &stored_hash);
+        
+        os_printf("Config reset to default\n");
+        device_reboot();
+        return true;
+    }
+
+    return false;
+}
+
 static void boot_counter_update(void){
     int32_t pwr_on_cnt = 0;
     configdb_get_i32("pwr_on_cnt", &pwr_on_cnt);
@@ -156,6 +198,7 @@ __init int main(void) {
     fal_init();
     //ota_reset_to_default();
     configdb_init();
+    firmware_check_updated_and_reset();
     littlefs_init();
     boot_counter_update();
     sys_event_init(32);
