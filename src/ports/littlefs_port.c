@@ -181,6 +181,7 @@ int32_t littlefs_init(void){
         if (err != 0) {
             return -1;
         }
+        lfs_mkdir(&g_lfs, "\\www");
         err = lfs_mount(&g_lfs, &g_lfs_cfg);
         if (err != 0) {
             return -1;

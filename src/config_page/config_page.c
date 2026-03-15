@@ -22,9 +22,9 @@
 /* extern lfs */
 extern lfs_t g_lfs;
 
-#define HTTP_PORT        80
-#define HTTP_REQ_MAX     4096
-#define HTTP_FILE_CHUNK  1024
+#define HTTP_PORT           80
+#define HTTP_REQ_MAX_LEN    16384
+#define HTTP_FILE_CHUNK     1024
 
 #define WWW_DIR          "www"
 
@@ -46,7 +46,7 @@ extern lfs_t g_lfs;
     HTTP_SEND_LITERAL((nc), (code), HTTP_CT_JSON, (lit))
 
 
-//#define HTTP_DEBUG
+#define HTTP_DEBUG
 
 #ifdef HTTP_DEBUG
 #define httpd_dbg(fmt, ...) os_printf("[HTTP] " fmt "\r\n", ##__VA_ARGS__)
@@ -109,7 +109,7 @@ static void http_send_raw( struct netconn *nc,
                            const char *content_type,
                            const void *body,
                            size_t body_len ){
-    char hdr[256];
+    char *hdr;
 
     if (nc == NULL) {
         return;
@@ -122,7 +122,12 @@ static void http_send_raw( struct netconn *nc,
         body_len = 0;
     }
 
-    snprintf(hdr, sizeof(hdr),
+    hdr = os_malloc(192);
+    if (hdr == NULL) {
+        return;
+    }
+
+    snprintf(hdr, 192,
              "HTTP/1.1 %d\r\n"
              "Content-Type: %s\r\n"
              "Cache-Control: no-cache\r\n"
@@ -168,180 +173,97 @@ static void http_send_json_cjson( struct netconn *nc, int code, cJSON *root ){
 /* HTTP parsing                                                               */
 /* -------------------------------------------------------------------------- */
 
-static bool http_parse_request_line( const char *buf,
-                                     char *method, size_t method_sz,
-                                     char *uri, size_t uri_sz ){
-    const char *eol;
-    const char *sp1;
-    const char *sp2;
-    size_t n;
-
-    if (buf == NULL || method == NULL || uri == NULL) {
-        return false;
+static const char *http_find_eol( const char *buf, size_t len ){
+    for (size_t i = 0; i + 1 < len; i++) {
+        if (buf[i] == '\r' && buf[i + 1] == '\n') {
+            return buf + i;
+        }
     }
-
-    eol = strstr(buf, "\r\n");
-    if (eol == NULL) {
-        return false;
-    }
-
-    sp1 = memchr(buf, ' ', (size_t)(eol - buf));
-    if (sp1 == NULL) {
-        return false;
-    }
-    sp2 = memchr(sp1 + 1, ' ', (size_t)(eol - (sp1 + 1)));
-    if (sp2 == NULL) {
-        return false;
-    }
-
-    n = (size_t)(sp1 - buf);
-    if (n == 0 || n >= method_sz) {
-        return false;
-    }
-    memcpy(method, buf, n);
-    method[n] = 0;
-
-    n = (size_t)(sp2 - (sp1 + 1));
-    if (n == 0 || n >= uri_sz) {
-        return false;
-    }
-    memcpy(uri, sp1 + 1, n);
-    uri[n] = 0;
-
-    return true;
+    return NULL;
 }
 
-static bool http_line_starts_with_ci( const char *p, const char *lit, int n ){
-    int i;
+static void http_get_method( const char *header, size_t header_len,
+                             char *method, size_t method_size ){
+    const char *method_end;
+    size_t method_len;
 
-    for (i = 0; i < n; i++) {
-        char a = p[i];
-        char b = lit[i];
-        if (a == 0 || b == 0) {
-            return false;
-        }
-        a = (char)tolower((unsigned char)a);
-        b = (char)tolower((unsigned char)b);
-        if (a != b) {
-            return false;
-        }
+    method[0] = 0;
+
+    if (!header || !method || method_size < 2) {
+        return;
     }
-    return true;
+
+    method_end = memchr(header, ' ', header_len);
+    if (!method_end) {
+        return;
+    }
+
+    method_len = method_end - header;
+    if (method_len >= method_size) {
+        method_len = method_size - 1;
+    }
+
+    memcpy(method, header, method_len);
+    method[method_len] = 0;
 }
 
 
-static int http_find_content_length( const char *hdr_start, const char *hdr_end ){
+static void http_get_uri( const char *header, size_t header_len,
+                          char *uri, size_t uri_size ){
+    const char *uri_start;
+    const char *uri_end;
+    size_t uri_len;
+
+    uri[0] = 0;
+
+    if (!header || !uri || uri_size < 2) {
+        return;
+    }
+
+    uri_start = memchr(header, ' ', header_len);
+    if (!uri_start) {
+        return;
+    }
+
+    uri_start++;
+
+    uri_end = memchr(uri_start, ' ', header + header_len - uri_start);
+    if (!uri_end) {
+        return;
+    }
+
+    uri_len = uri_end - uri_start;
+    if (uri_len >= uri_size) {
+        uri_len = uri_size - 1;
+    }
+
+    memcpy(uri, uri_start, uri_len);
+    uri[uri_len] = 0;
+}
+
+static int32_t http_get_content_length( const char *header, size_t header_len ){
     const char *p;
+    const char *end = header + header_len;
+    int32_t n = 0;
 
-    if (hdr_start == NULL || hdr_end == NULL || hdr_end <= hdr_start) {
+    if (!header) {
         return 0;
     }
 
-    p = hdr_start;
-
-    while (p < hdr_end) {
-        const char *line_end = strstr(p, "\r\n");
-        if (line_end == NULL || line_end > hdr_end) {
-            line_end = hdr_end;
-        }
-
-        if ((line_end - p) >= 15) {
-            if (http_line_starts_with_ci(p, "Content-Length:", 15)) {
-                const char *v = p + 15;
-                while (v < line_end && (*v == ' ' || *v == '\t')) { v++; }
-                if (v >= line_end) {
-                    return 0;
-                }
-                {
-                    long n = strtol(v, NULL, 10);
-                    if (n <= 0) {
-                        return 0;
-                    }
-                    if (n > 1024 * 1024) {  /* clamp: we don't support huge bodies here */
-                        return 1024 * 1024;
-                    }
-                    return (int)n;
-                }
-            }
-        }
-
-        if (line_end == hdr_end) {
-            break;
-        }
-        p = line_end + 2;
+    p = lwip_strnstr(header, "Content-Length:", header_len);
+    if (!p) {
+        return 0;
     }
 
-    return 0;
-}
+    p += 15;
 
-
-static int http_recv_request( struct netconn *nc, char *buf, int buf_sz ){
-    int total = 0;
-    char *hdr_end;
-    int need_total = -1; /* unknown */
-    int content_len = 0;
-
-    if (nc == NULL || buf == NULL || buf_sz <= 0) {
-        return -1;
+    while (p < end && (*p == ' ' || *p == '\t')) {
+        p++;
     }
 
-    while (total < buf_sz - 1) {
-        struct netbuf *nb = NULL;
-        void *data = NULL;
-        u16_t len = 0;
-        err_t err;
+    n = atoi(p);
 
-        err = netconn_recv(nc, &nb);
-        if (err != ERR_OK || nb == NULL) {
-            if (nb) { netbuf_delete(nb); }
-            break;
-        }
-
-        if (((buf_sz - 1) - total) > 0) {
-            int can = (buf_sz - 1) - total;
-
-            netbuf_first(nb);
-            do {
-                netbuf_data(nb, &data, &len);
-                if (data == NULL || len == 0) {
-                    break;
-                }
-
-                {
-                    int take = can;
-                    if ((int)len < take) {
-                        take = (int)len;
-                    }
-                    memcpy(buf + total, data, (size_t)take);
-                    total += take;
-                    can -= take;
-                    buf[total] = 0;
-                }
-
-                if (can <= 0) {
-                    break;
-                }
-            } while (netbuf_next(nb) != 0);
-        }
-
-        netbuf_delete(nb);
-
-        if (need_total < 0) {
-            hdr_end = strstr(buf, "\r\n\r\n");
-            if (hdr_end != NULL) {
-                const char *headers_start = buf;
-                const char *headers_end = hdr_end;
-                content_len = http_find_content_length(headers_start, headers_end);
-                need_total = (int)((hdr_end - buf) + 4 + content_len);
-            }
-        }
-
-        if (need_total >= 0 && total >= need_total) {
-            break;
-        }
-    }
-
-    return total;
+    return n;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -349,16 +271,20 @@ static int http_recv_request( struct netconn *nc, char *buf, int buf_sz ){
 /* -------------------------------------------------------------------------- */
 
 static void http_serve_file( struct netconn *nc, const char *uri ){
-    char path[256];
+    char path[32];
     lfs_file_t f;
     lfs_ssize_t r;
     int rc;
 
     if (nc == NULL || uri == NULL) {
+        httpd_dbg("serve_file: bad args nc=%p uri=%p", nc, uri);
         return;
     }
 
+    httpd_dbg("serve_file: uri='%s'", uri);
+
     if (!http_path_is_safe(uri)) {
+        httpd_dbg("serve_file: unsafe path '%s'", uri);
         http_send_text(nc, 400, "bad path\n");
         return;
     }
@@ -370,36 +296,65 @@ static void http_serve_file( struct netconn *nc, const char *uri ){
         snprintf(path, sizeof(path), "%s/%s", WWW_DIR, uri);
     }
 
+    httpd_dbg("serve_file: open path='%s'", path);
+
     rc = lfs_file_open(&g_lfs, &f, path, LFS_O_RDONLY);
     if (rc < 0) {
+        httpd_dbg("serve_file: open failed rc=%d", rc);
         http_send_text(nc, 404, "not found\n");
         return;
     }
 
     {
-        char hdr[256];
-        snprintf(hdr, sizeof(hdr),
-                 "HTTP/1.1 200\r\n"
-                 "Content-Type: %s\r\n"
-                 "Cache-Control: no-cache\r\n"
-                 "Connection: close\r\n"
-                 "\r\n",
-                 http_content_type(path));
+        char *hdr = os_malloc(128);
+        if (hdr == NULL) {
+            httpd_dbg("serve_file: malloc failed");
+            return;
+        }
+
+        snprintf(hdr, 128,
+                "HTTP/1.1 200\r\n"
+                "Content-Type: %s\r\n"
+                "Cache-Control: no-cache\r\n"
+                "Connection: close\r\n"
+                "\r\n",
+                http_content_type(path));
+
+        httpd_dbg("serve_file: send header type='%s'", http_content_type(path));
+
         (void)netconn_write(nc, hdr, strlen(hdr), NETCONN_COPY);
+
+        os_free(hdr);
     }
 
     {
-        uint8_t chunk[HTTP_FILE_CHUNK];
+        uint8_t *chunk = os_malloc(HTTP_FILE_CHUNK);
+        uint32_t total = 0;
+
+        if (chunk == NULL) {
+            httpd_dbg("serve_file: malloc failed");
+            return;
+        }
+
         while (1) {
-            r = lfs_file_read(&g_lfs, &f, chunk, sizeof(chunk));
+            r = lfs_file_read(&g_lfs, &f, chunk, HTTP_FILE_CHUNK);
             if (r <= 0) {
+                httpd_dbg("serve_file: read end r=%d total=%u", (int)r, total);
                 break;
             }
+
+            total += r;
+            httpd_dbg("serve_file: send chunk %d", (int)r);
+
             (void)netconn_write(nc, chunk, (size_t)r, NETCONN_COPY);
         }
+
+        os_free(chunk);
     }
 
     (void)lfs_file_close(&g_lfs, &f);
+
+    httpd_dbg("serve_file: done '%s'", path);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -431,8 +386,8 @@ static void http_handle_api( struct netconn *nc,
     cJSON *out = NULL;
     int32_t rc;
     int http_code;
-
     if (nc == NULL || method == NULL || uri == NULL) {
+        httpd_dbg("bad request, %p %p %p", nc, method, uri);
         http_send_text(nc, 400, "bad request\n");
         return;
     }
@@ -447,6 +402,7 @@ static void http_handle_api( struct netconn *nc,
             HTTP_SEND_JSON_LITERAL(nc, 400, HTTP_JSON_ERR_EMPTY_BODY);
             return;
         }
+		httpd_dbg("BODY RAW len=%d: '%.*s'", body_len, body_len, body);
 
         req = cJSON_ParseWithLength(body, (size_t)body_len);
         if (req == NULL || !cJSON_IsObject(req)) {
@@ -496,87 +452,183 @@ static void http_handle_api( struct netconn *nc,
     if (out) { cJSON_Delete(out); }
 }
 
-/* -------------------------------------------------------------------------- */
-/* One connection                                                             */
-/* -------------------------------------------------------------------------- */
+static void http_dbg_dump_text(const char *prefix, const char *data, int len){
+    int off = 0;
+
+    httpd_dbg("%s len=%d:", prefix ? prefix : "", len);
+
+    while (off < len) {
+        int chunk = len - off;
+        if (chunk > 64) chunk = 64;
+
+        hgprintf("%.*s", chunk, data + off);
+
+        off += chunk;
+    }
+
+    hgprintf("\n");
+}
 
 static void http_handle_one( struct netconn *nc ){
-    char buf[HTTP_REQ_MAX + 1];
-    int n;
     char method[8];
-    char uri[128];
+    char uri[32];
     char *hdr_end;
-    int header_len;
-    int content_len;
+    int32_t header_len;
+    int32_t content_len;
     const char *body;
     int body_len;
+    struct netbuf *nb = NULL;
+    char *data = NULL;
+    uint16_t data_len = 0;
+    uint16_t total_need = 0;
 
     if (nc == NULL) {
         return;
     }
 
-    memset(buf, 0, sizeof(buf));
     memset(method, 0, sizeof(method));
     memset(uri, 0, sizeof(uri));
 
-    n = http_recv_request(nc, buf, sizeof(buf));
-    if (n <= 0) {
-        return;
+    if (netconn_recv(nc, &nb) != ERR_OK || nb == NULL) {
+        goto end;
     }
-    buf[n] = 0;
 
-    hdr_end = strstr(buf, "\r\n\r\n");
+    uint16_t first_len = 0;
+
+    netbuf_first(nb);
+    do {
+        void *chunk;
+        uint16_t chunk_len;
+
+        netbuf_data(nb, &chunk, &chunk_len);
+        first_len += chunk_len;
+    } while (netbuf_next(nb) >= 0);
+
+    if (first_len == 0 || first_len > HTTP_REQ_MAX_LEN) {
+        goto end;
+    }
+
+    data = os_malloc(first_len);
+    if (data == NULL) {
+        goto end;
+    }
+    data[data_len] = '\0';
+
+    netbuf_first(nb);
+    do {
+        void *chunk;
+        uint16_t chunk_len;
+
+        netbuf_data(nb, &chunk, &chunk_len);
+        memcpy(data + data_len, chunk, chunk_len);
+        data_len += chunk_len;
+    } while (netbuf_next(nb) >= 0);
+
+    hdr_end = lwip_strnstr(data, "\r\n\r\n", data_len);
     if (hdr_end == NULL) {
         http_send_text(nc, 400, "bad request\n");
-        return;
+        goto end;
     }
 
-    if (!http_parse_request_line(buf, method, sizeof(method), uri, sizeof(uri))) {
+    header_len = (hdr_end - data) + 4;
+
+    http_get_uri(data, header_len, uri, sizeof(uri));
+    http_get_method(data, header_len, method, sizeof(method));
+    if (uri[0] == '\0' || method[0] == '\0') {
         http_send_text(nc, 400, "bad request\n");
-        return;
+        goto end;
     }
 
-    {
-        char *q;
-
-        q = strchr(uri, '?');
-        if (q) { *q = 0; }
-        q = strchr(uri, '#');
-        if (q) { *q = 0; }
+    content_len = http_get_content_length(data, header_len);
+    if (content_len < 0) {
+        content_len = 0;
     }
 
-    header_len = (int)((hdr_end - buf) + 4);
-    content_len = http_find_content_length(buf, hdr_end);
-
-    body = buf + header_len;
-    body_len = n - header_len;
-
-    if (content_len > 0 && body_len > content_len) {
-        body_len = content_len;
+    total_need = header_len + content_len;
+    if (total_need == 0 || total_need > HTTP_REQ_MAX_LEN) {
+        http_send_text(nc, 400, "request too large\n");
+        goto end;
     }
 
-    if (content_len > 0 && body_len < content_len) {
-        http_send_text(nc, 400, "incomplete body\n");
-        return;
-    }
-    if (content_len > (HTTP_REQ_MAX - header_len)) {
-        http_send_text(nc, 413, "payload too large\n");
-        return;
+    if (total_need > data_len) {
+        char *new_data = os_malloc(total_need);
+        if (new_data == NULL) {
+            goto end;
+        }
+
+        memcpy(new_data, data, data_len);
+        os_free(data);
+        data = new_data;
+
+        while (data_len < total_need) {
+            if (nb) {
+                netbuf_delete(nb);
+                nb = NULL;
+            }
+
+            if (netconn_recv(nc, &nb) != ERR_OK || nb == NULL) {
+                http_send_text(nc, 400, "incomplete body\n");
+                goto end;
+            }
+
+            netbuf_first(nb);
+            do {
+                void *chunk;
+                uint16_t chunk_len;
+                uint16_t remain;
+
+                netbuf_data(nb, &chunk, &chunk_len);
+
+                remain = total_need - data_len;
+                if (chunk_len > remain) {
+                    chunk_len = remain;
+                }
+
+                memcpy(data + data_len, chunk, chunk_len);
+                data_len += chunk_len;
+
+                if (data_len >= total_need) {
+                    break;
+                }
+            } while (netbuf_next(nb) >= 0);
+        }
     }
 
-    httpd_dbg("%s %s body=%d", method, uri, body_len);
+    http_dbg_dump_text("BODY RAW", data, data_len);
+
+    body = data + header_len;
+    body_len = data_len - header_len;
+
+    if (content_len > 0) {
+        if (body_len > content_len) {
+            body_len = content_len;
+        }
+
+        if (body_len < content_len) {
+            http_send_text(nc, 400, "incomplete body\n");
+            goto end;
+        }
+    } else {
+        body = NULL;
+        body_len = 0;
+    }
 
     if (strncmp(uri, "/api/", 5) == 0) {
         http_handle_api(nc, method, uri, body, body_len);
-        return;
+        goto end;
     }
 
     http_serve_file(nc, uri);
+
+end:
+    if (data) {
+        os_free(data);
+    }
+    if (nb) {
+        netbuf_delete(nb);
+    }
 }
 
-/* -------------------------------------------------------------------------- */
-/* Server task                                                                */
-/* -------------------------------------------------------------------------- */
 static void http_server_task( void *arg ){
     struct netconn *listen_nc = NULL;
 
@@ -604,6 +656,7 @@ static void http_server_task( void *arg ){
             os_sleep_ms(10);
             continue;
         }
+        netconn_set_recvtimeout(client, 3000);
 
         http_handle_one(client);
         netconn_close(client);
