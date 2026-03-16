@@ -27,6 +27,12 @@ typedef struct lmac_ops lmac_ops_t;
 #define LMAC_PHY_WD_RX_ACTIVE     (1U << 2)
 #define LMAC_PHY_WD_SCAN_TIMER    (1U << 3)
 
+typedef struct skb_list {
+    struct sk_buff *head;
+    struct sk_buff *tail;
+    uint32_t        count;
+} skb_list_t;
+
 typedef struct lmac_ctx {
     /* 0x000 */
     lmac_ops_t *ops;            // pointer to low‑MAC operation table
@@ -346,4 +352,46 @@ typedef struct lmac_ctx {
     uint8_t     reserved_bb4[0xC14 - 0xBB4];
 } lmac_ctx_t;
 
+typedef struct lmac_ah_tx_ctx {
+    uint8_t             rsv_000[0x008];
+    void               *prealloc_skb;
+    uint8_t             rsv_00c[0x02c - 0x00c];
+
+    struct os_task      tx_task;
+    struct os_task      tx_status_task;
+
+    struct os_semaphore tx_sem;
+    struct os_semaphore tx_status_sem;
+
+    skb_list_t          tx_q;
+    skb_list_t          txsq;
+    skb_list_t          aux_q;
+    skb_list_t          ac_q[4];
+
+    uint8_t             ac_state[4][0x120];    /* 0x0b8..0x537 */
+
+    skb_list_t          stat_q;
+
+    uint8_t             rsv_544[0x6ac - 0x544];
+    uint8_t             ce_rate_0;
+    uint8_t             ce_rate_1;
+    uint8_t             ce_rate_2;
+    uint8_t             ce_rate_3;
+    uint32_t            ce_ptr_0;
+    uint32_t            ce_ptr_1;
+    uint8_t             rsv_6b8[0x6bc - 0x6b8];
+    uint8_t             ce_bw_copy;
+    uint8_t             rsv_6bd[0x6be - 0x6bd];
+    uint16_t            ce_len;
+    uint8_t             rsv_6c0[0x6c8 - 0x6c0];
+    uint8_t             ce_bw;
+    uint8_t             rsv_6c9[0x6cc - 0x6c9];
+    uint32_t            seq_num_space;
+    uint8_t             rsv_6d0[0x760 - 0x6d0];
+    uint32_t            tx_latency_max;
+    uint32_t            tx_latency_sum;
+    uint8_t             rsv_768[0x768 - 0x6d4];
+} lmac_ah_tx_ctx_t;
+
 extern lmac_ctx_t ah_lmac;
+extern lmac_ah_tx_ctx_t ah_lmac_tx;

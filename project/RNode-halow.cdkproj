@@ -730,6 +730,11 @@ Board: txw4002a
                 <FileOption/>
               </File>
             </VirtualDirectory>
+            <VirtualDirectory Name="mqtt">
+              <File Name="../sdk/lib/net/lwip/src/apps/mqtt/mqtt.c">
+                <FileOption/>
+              </File>
+            </VirtualDirectory>
           </VirtualDirectory>
         </VirtualDirectory>
         <VirtualDirectory Name="skmonitor">
@@ -1010,10 +1015,10 @@ Board: txw4002a
     <File Name="../src/indication.c">
       <FileOption/>
     </File>
-    <File Name="../src/ramfs.c">
+    <File Name="../src/telemetry.c">
       <FileOption/>
     </File>
-    <File Name="../src/ports/fal_osram_port.c">
+    <File Name="../src/halow_debug.c">
       <FileOption/>
     </File>
   </VirtualDirectory>
@@ -1149,7 +1154,7 @@ Board: txw4002a
         <LDFile>$(ProjectPath)\..\gcc_csky.ld</LDFile>
         <LibName>m;;core;netutils;common;osal;lmac</LibName>
         <LibPath>$(ProjectPath)/../libs</LibPath>
-        <OtherFlags>-Wl,-zmax-page-size=1024  -Wl,-Map=project.map -Wl,--wrap=lwip_netif_hook_inputdata -Wl,--wrap=lmac_send_bss_announcement</OtherFlags>
+        <OtherFlags>-Wl,-zmax-page-size=1024  -Wl,-Map=project.map -Wl,--wrap=lwip_netif_hook_inputdata -Wl,--wrap=lmac_send_bss_announcement -Wl,--wrap=ah_rfspi_write -Wl,--wrap=ah_rfspi_read</OtherFlags>
         <AutoLDFile>no</AutoLDFile>
         <LinkType/>
         <IncludeAllLibs>no</IncludeAllLibs>
@@ -1243,12 +1248,16 @@ Board: txw4002a
     </BuildConfig>
   </BuildConfigs>
   <DebugSessions>
-    <watchExpressions>psalive:1;sdata:1;__sleep_data_start:1;__sleep_data_stop:1;g_rx_cb:1;g_ops:1</watchExpressions>
-    <memoryExpressions>0x50000000;;;</memoryExpressions>
+    <watchExpressions>psalive:1;sdata:1;__sleep_data_start:1;__sleep_data_stop:1;g_rx_cb:1;g_ops:1;ah_lmac_tx:1;g_ops:1;ah_lmac:1</watchExpressions>
+    <memoryExpressions>0x50000000;0x2009e49c;;</memoryExpressions>
     <statistics>;;MHZ;;MHZ;;up</statistics>
     <peripheralTabs>
       <Tab disFormat="Hex">SYSCTRL</Tab>
+      <Tab disFormat="Hex">ZH_RFSPI</Tab>
+      <Tab disFormat="Hex">RFADCDIG</Tab>
+      <Tab disFormat="Hex">RFDIGCAL</Tab>
       <Tab disFormat="Hex">GMAC</Tab>
+      <Tab disFormat="Hex">MODEM</Tab>
     </peripheralTabs>
     <WatchDisplayFormat>1</WatchDisplayFormat>
     <LocalDisplayFormat>1</LocalDisplayFormat>
