@@ -258,13 +258,17 @@
         dir.disabled = !telemetryEnabled || !directional;
     }
 
+    async function postJson(url, payload) {
+        return fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload ?? {})
+        });
+    }
+
     async function resetStats() {
         try {
-            await fetch('/api/reset_stat', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: '{}'
-            });
+            await postJson('/api/reset_stat', {});
         } catch (err) {
             console.error('resetStats error', err);
         }
@@ -421,11 +425,7 @@
     async function saveHalow() {
         const payload = readHalowForm();
         try {
-            await fetch('/api/halow_cfg', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
+            await postJson('/api/halow_cfg', payload);
         } catch (err) {
             console.error('saveHalow error', err);
         }
@@ -435,11 +435,7 @@
     async function saveLbt() {
         const payload = readLbtForm();
         try {
-            await fetch('/api/lbt_cfg', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
+            await postJson('/api/lbt_cfg', payload);
         } catch (err) {
             console.error('saveLbt error', err);
         }
@@ -449,11 +445,7 @@
     async function saveNet() {
         const payload = readNetForm();
         try {
-            await fetch('/api/net_cfg', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
+            await postJson('/api/net_cfg', payload);
         } catch (err) {
             console.error('saveNet error', err);
         }
@@ -463,11 +455,7 @@
     async function saveTcp() {
         const payload = readTcpForm();
         try {
-            await fetch('/api/tcp_server_cfg', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
+            await postJson('/api/tcp_server_cfg', payload);
         } catch (err) {
             console.error('saveTcp error', err);
         }
@@ -577,7 +565,6 @@
             if (!silent) {
                 clearStatus('telemetry_status');
             }
-            updateSaveButton('telemetry');
             return true;
         }
 
@@ -623,54 +610,54 @@
         updateSaveButton('telemetry');
     }
 
-    async function saveTelemetry() {
-        if (!validateTelemetryForm()) {
-            updateSaveButton('telemetry');
-            return;
-        }
-
+    function buildTelemetryPayload() {
+        const enabled = document.getElementById('telemetry_en').checked;
         const lat = parseCoordinate(document.getElementById('telemetry_lat').value, 'lat');
         const lon = parseCoordinate(document.getElementById('telemetry_lon').value, 'lon');
 
-        const payload = {
-            en: document.getElementById('telemetry_en').checked,
+        return {
+            en: enabled,
             ext: document.getElementById('telemetry_ext').checked,
-            prd: parseInt(document.getElementById('telemetry_prd').value, 10),
+            prd: parseInt(document.getElementById('telemetry_prd').value, 10) || 300,
             host: document.getElementById('telemetry_host').value.trim(),
-            port: parseInt(document.getElementById('telemetry_port').value, 10),
-            lat: lat.value,
-            lon: lon.value,
+            port: parseInt(document.getElementById('telemetry_port').value, 10) || 1883,
+            lat: (enabled && lat.ok) ? lat.value : 0,
+            lon: (enabled && lon.ok) ? lon.value : 0,
             dir_en: document.getElementById('telemetry_dir_en').checked,
-            dir: parseInt(document.getElementById('telemetry_dir').value, 10),
+            dir: parseInt(document.getElementById('telemetry_dir').value, 10) || 0,
             usr: document.getElementById('telemetry_usr').value,
             pwd: document.getElementById('telemetry_pwd').value,
             top: document.getElementById('telemetry_top').value,
             name: document.getElementById('telemetry_name').value,
             lxmf: sanitizeLxmf(document.getElementById('telemetry_lxmf').value)
         };
+    }
+
+    async function saveTelemetry() {
+        if (!validateTelemetryForm()) {
+            updateSaveButton('telemetry');
+            return;
+        }
+
+        const payload = buildTelemetryPayload();
 
         try {
-            const res = await fetch('/api/telemetry_cfg', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-
+            const res = await postJson('/api/telemetry_cfg', payload);
             if (!res.ok) {
                 setStatus('telemetry_status', 'Failed to save telemetry settings', true);
                 return;
             }
-
-            document.getElementById('telemetry_lat').value = formatCoordinateNumber(lat.value);
-            document.getElementById('telemetry_lon').value = formatCoordinateNumber(lon.value);
-            document.getElementById('telemetry_lxmf').value = payload.lxmf;
-            setStatus('telemetry_status', 'Telemetry settings saved', false);
         } catch (err) {
-            console.error('saveTelemetry error', err);
+            console.error('saveTelemetry error', err, payload);
             setStatus('telemetry_status', 'Failed to save telemetry settings', true);
+            return;
         }
 
-        loadAll();
+        document.getElementById('telemetry_lat').value = formatCoordinateNumber(payload.lat);
+        document.getElementById('telemetry_lon').value = formatCoordinateNumber(payload.lon);
+        document.getElementById('telemetry_lxmf').value = payload.lxmf;
+        setStatus('telemetry_status', 'Telemetry settings saved', false);
+        await loadAll();
     }
 
     async function sendTelemetryNow() {
@@ -679,12 +666,7 @@
         clearStatus('telemetry_status');
 
         try {
-            const res = await fetch('/api/telemetry_send', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: '{}'
-            });
-
+            const res = await postJson('/api/telemetry_send', {});
             if (!res.ok) {
                 setStatus('telemetry_status', 'Telemetry send request failed', true);
                 return;
@@ -798,11 +780,7 @@
         fwLog('[*] Reboot request sent');
 
         try {
-            const res = await fetch('/api/reboot', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: '{}'
-            });
+            const res = await postJson('/api/reboot', {});
 
             if (!res.ok) {
                 setStatus('fw_action_status', 'Reboot request failed', true);
@@ -828,11 +806,7 @@
         fwLog('[*] Factory reset request sent');
 
         try {
-            const res = await fetch('/api/default_rst', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: '{}'
-            });
+            const res = await postJson('/api/default_rst', {});
 
             if (!res.ok) {
                 setStatus('fw_action_status', 'Factory reset request failed', true);
