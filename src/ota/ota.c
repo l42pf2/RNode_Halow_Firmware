@@ -38,11 +38,13 @@ static const struct fal_partition *g_ota_part;
 static bool g_ota_erased;
 static uint32_t g_ota_total;
 
+static int ota_format_littefs( void );
+
 static const struct fal_partition *ota_fal_part_get( void ){
     if (g_ota_part != NULL) {
         return g_ota_part;
     }
-    g_ota_part = fal_partition_find(OTA_FAL_PART_NAME);
+    g_ota_part = fal_partition_find(FAL_PART_NAME_FIRMWARE);
     return g_ota_part;
 }
 
@@ -348,6 +350,62 @@ static int ota_cmd_get_ip( struct netif *nif, uint8_t *data, uint32_t len ){
     return (e == ERR_OK) ? 0 : -1;
 }
 
+static int ota_cmd_format_littlefs( struct netif *nif, uint8_t *data, uint32_t len ){
+    int rc;
+    struct eth_ota_hdr *hdr;
+    struct eth_ota_hdr resp;
+    struct pbuf *p;
+    err_t e = ERR_IF;
+
+    if (nif == NULL) {
+        ota_dbg("FORMAT_LFS: nif NULL");
+        return -1;
+    }
+    if (data == NULL) {
+        ota_dbg("FORMAT_LFS: data NULL");
+        return -1;
+    }
+    if (len < sizeof(struct eth_ota_hdr)) {
+        ota_dbg("FORMAT_LFS: short len=%lu", (unsigned long)len);
+        return -1;
+    }
+
+    hdr = (struct eth_ota_hdr *)data;
+
+    rc = ota_format_littefs();
+
+    memset(&resp, 0, sizeof(resp));
+    get_mac(resp.src);
+    memcpy(resp.dest, hdr->src, 6);
+    resp.proto  = __be16(ETH_P_OTA);
+    resp.stype  = ETH_P_OTA_FW_FORMAT_LITTLEFS_RESP;
+    resp.status = (rc == 0) ? 0 : 1;
+
+    p = pbuf_alloc(PBUF_RAW, (uint16_t)sizeof(resp), PBUF_RAM);
+    if (p == NULL) {
+        ota_dbg("FORMAT_LFS: pbuf_alloc failed");
+        return -1;
+    }
+
+    memcpy(p->payload, &resp, sizeof(resp));
+
+    if (nif->linkoutput) {
+        e = nif->linkoutput(nif, p);
+    } else {
+        ota_dbg("FORMAT_LFS: linkoutput NULL");
+    }
+
+    pbuf_free(p);
+
+    ota_dbg("FORMAT_LFS: format_rc=%d send=%d", rc, (int)e);
+
+    if (rc != 0) {
+        return -1;
+    }
+
+    return (e == ERR_OK) ? 0 : -1;
+}
+
 int ota_process_package(struct netif* nif, uint8_t* data, uint32_t len){
     if(len < sizeof(struct eth_ota_hdr)){
         return -1;
@@ -364,6 +422,7 @@ int ota_process_package(struct netif* nif, uint8_t* data, uint32_t len){
         case ETH_P_OTA_FW_DATA:             ota_dbg("PROCESS: FW_DATA");    ota_cmd_firmware_data(nif, data, len);  break;
         case ETH_P_OTA_REBOOT:              ota_dbg("PROCESS: REBOOT");     ota_cmd_reboot(nif, data, len);         break;
         case ETH_P_OTA_FW_CUSTOM_GET_IP:    ota_dbg("PROCESS: GET_IP");     ota_cmd_get_ip(nif, data, len);         break;
+        case ETH_P_OTA_FW_FORMAT_LITTLEFS:  ota_dbg("PROCESS: FORMAT_LFS"); ota_cmd_format_littlefs(nif, data, len);break;
         default:                            ota_dbg("PROCESS: unknown");                                            break;
     }
     return -1;
@@ -379,7 +438,7 @@ int32_t __wrap_lwip_netif_hook_inputdata(struct netif* nif, uint8_t* data, uint3
 int ota_reset_to_default( void ){
     const struct fal_partition *p;
 
-    p = fal_partition_find("fdb_kvdb1");
+    p = fal_partition_find(FAL_PART_NAME_KVDB);
     if (p == NULL) {
         return -1;
     }
@@ -388,14 +447,19 @@ int ota_reset_to_default( void ){
         return -2;
     }
 
-    p = fal_partition_find("littlefs");
+    return 0;
+}
+
+static int ota_format_littefs( void ){
+    const struct fal_partition *p;
+    lfs_unmount(&g_lfs);
+    p = fal_partition_find(FAL_PART_NAME_LITTLEFS);
     if (p == NULL) {
-        return -3;
+        return -1;
     }
 
     if (fal_partition_erase(p, 0, p->len) < 0) {
-        return -4;
+        return -2;
     }
-
     return 0;
 }

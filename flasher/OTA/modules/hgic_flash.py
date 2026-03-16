@@ -85,7 +85,7 @@ class HgicFlasher:
         device_mac: str,
         firmware: bytes | Path | str,
         *,
-        timeout: float = 0.5,
+        timeout: float = 2.5,
         retries: int = 10,
         progress_cb: Optional[Callable[[int, int, float], None]] = None,
     ) -> None:

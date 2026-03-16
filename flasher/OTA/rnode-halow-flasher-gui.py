@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import platform
+import struct
 import queue
 import shutil
 import sys
@@ -46,9 +47,12 @@ from typing import Any, Dict, Optional, Tuple, List
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+from scapy.all import Ether, Raw, AsyncSniffer, sendp  # type: ignore
+
 from modules import scan_all_parallel
 from modules import HgicSession
 from modules.hgic_scan import scan_iface
+from modules.hgic_ota import ETH_P_OTA
 from modules.hgic_ota_tar import inspect_ota_tar
 
 
@@ -70,6 +74,34 @@ BUILTIN_PREFLASH_FW_CANDIDATES = [
     "txw8301_v2.4.1.3-38247_2025.11.6_TAIXIN_WNB.bin",
     "E611-orig.bin",
 ]
+
+# ----------------------------
+# OTA / timeouts (main file only)
+# ----------------------------
+
+MAIN_TIMEOUT_SCALE = 1.0
+
+
+def main_timeout(value: float) -> float:
+    return float(value) * float(MAIN_TIMEOUT_SCALE)
+
+
+ETH_P_OTA_FW_CUSTOM_GET_IP              = 0xF0
+ETH_P_OTA_FW_CUSTOM_GET_IP_RESP         = 0xF1
+ETH_P_OTA_FW_FORMAT_LITTLEFS            = 0xF2
+ETH_P_OTA_FW_FORMAT_LITTLEFS_RESP       = 0xF3
+
+
+def pack_format_littlefs_req() -> bytes:
+    return struct.pack("BB", ETH_P_OTA_FW_FORMAT_LITTLEFS, 0)
+
+
+def parse_format_littlefs_resp_payload(b: bytes) -> Optional[int]:
+    if len(b) < 2:
+        return None
+    if b[0] != int(ETH_P_OTA_FW_FORMAT_LITTLEFS_RESP):
+        return None
+    return int(b[1])
 
 
 # ----------------------------
@@ -200,7 +232,7 @@ def is_builtin_source(src: str) -> bool:
     return str(src or "").strip() == "builtin"
 
 
-def http_get_json(url: str, timeout_s: float = 1.0) -> Optional[Dict[str, Any]]:
+def http_get_json(url: str, timeout_s: float = main_timeout(1.0)) -> Optional[Dict[str, Any]]:
     try:
         import urllib.request
         req = urllib.request.Request(url, headers={"User-Agent": "rnode-halow-gui"})
@@ -282,7 +314,7 @@ class GhRelease:
     assets: List[GhAsset]
 
 
-def github_list_release_tags(timeout_s: float = 8.0) -> List[GhRelease]:
+def github_list_release_tags(timeout_s: float = main_timeout(8.0)) -> List[GhRelease]:
     import urllib.request
     req = urllib.request.Request(GITHUB_API_RELEASES, headers={"User-Agent": "rnode-halow-gui"})
     with urllib.request.urlopen(req, timeout=float(timeout_s)) as r:
@@ -331,7 +363,7 @@ def github_pick_asset(rel: GhRelease) -> Optional[GhAsset]:
     return None
 
 
-def github_download(url: str, out_path: Path, progress_cb=None, timeout_s: float = 30.0) -> None:
+def github_download(url: str, out_path: Path, progress_cb=None, timeout_s: float = main_timeout(30.0)) -> None:
     import urllib.request
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -766,7 +798,7 @@ class App(tk.Tk):
 
     def _gh_refresh_worker(self) -> None:
         try:
-            rels = github_list_release_tags(timeout_s=8.0)
+            rels = github_list_release_tags(timeout_s=main_timeout(8.0))
             self._q.put(("gh_rels", rels))
         except Exception as e:
             self._q.put(("gh_err", str(e)))
@@ -807,7 +839,7 @@ class App(tk.Tk):
             self._q.put(("progress", (pct, done, total, speed)))
 
         try:
-            github_download(asset.url, out_path, progress_cb=cb, timeout_s=30.0)
+            github_download(asset.url, out_path, progress_cb=cb, timeout_s=main_timeout(30.0))
             self._q.put(("fw_set", (str(out_path), "ota" if asset.is_tar else "bin", tag)))
             self._q.put(("log", (f"[OK] GitHub ready: {tag}", "ok")))
         except Exception as e:
@@ -871,7 +903,7 @@ class App(tk.Tk):
             for _ in range(int(max(1, delay * 10))):
                 if self._stop.is_set():
                     break
-                time.sleep(0.1)
+                time.sleep(main_timeout(0.1))
 
     def _scan_once_async(self) -> None:
         threading.Thread(target=self._scan_worker, daemon=True).start()
@@ -881,7 +913,7 @@ class App(tk.Tk):
         if not self._pcap_lock.acquire(blocking=False):
             return
         try:
-            devs = scan_all_parallel(packet_cnt=10, period_sec=0.010, sniff_time=0.5)
+            devs = scan_all_parallel(packet_cnt=10, period_sec=main_timeout(0.010), sniff_time=main_timeout(0.5))
         except Exception as e:
             self._q.put(("log", (f"[ERR] scan failed: {e}", "err")))
             return
@@ -922,7 +954,7 @@ class App(tk.Tk):
         now = time.time()
         last = float(self._ip_poll_last.get(key, 0.0))
         # rate limit: 2 seconds
-        if (now - last) < 2.0:
+        if (now - last) < main_timeout(2.0):
             return
         self._ip_poll_last[key] = now
         self._ip_jobs_inflight.add(key)
@@ -936,7 +968,7 @@ class App(tk.Tk):
             with self._pcap_lock:
                 with self._iface_lock(r.iface_id):
                     sess = HgicSession(r.iface_id)
-                    ans = sess.get_ip(r.mac, tries=1, timeout=0.35)
+                    ans = sess.get_ip(r.mac, tries=1, timeout=main_timeout(0.35))
             if ans is not None:
                 ip_s = str(getattr(ans, "ip", "") or "")
                 if ip_s == "0.0.0.0":
@@ -945,7 +977,7 @@ class App(tk.Tk):
 
             if ip_s and not ver_s:
                 for path in ("/api/heartbeat", "/api/version", "/api/info", "/api/get_all"):
-                    obj = http_get_json(f"http://{ip_s}{path}", timeout_s=1.0)
+                    obj = http_get_json(f"http://{ip_s}{path}", timeout_s=main_timeout(1.0))
                     if isinstance(obj, dict):
                         v = pick_version_from_json(obj)
                         if v:
@@ -1075,22 +1107,22 @@ class App(tk.Tk):
                     if needs_preflash:
                         preflash_name = pick_preflash_firmware_name()
                         self._q.put(("log", (f'[*] flash original firmware "{preflash_name}"', "stage")))
-                        sess.flash(r.mac, read_builtin_firmware(preflash_name), timeout=0.45, retries=5, progress_cb=cb_progress, retry_cb=cb_retry)
+                        sess.flash(r.mac, read_builtin_firmware(preflash_name), timeout=main_timeout(5.45), retries=5, progress_cb=cb_progress, retry_cb=cb_retry)
                         self._q.put(("log", ("[OK] original firmware flashed", "ok")))
                         self._q.put(("log", ("[*] reboot original firmware", "stage")))
-                        sess.reboot(r.mac, flags=0, count=3, period_sec=0.05)
+                        sess.reboot(r.mac, flags=0, count=3, period_sec=main_timeout(0.05))
                         self._q.put(("log", ("[*] waiting original firmware reboot...", "stage")))
-                        if not self._wait_hgic_ready(r.mac, r.iface_id, overall_timeout_s=15.0):
+                        if not self._wait_hgic_ready(r.mac, r.iface_id, overall_timeout_s=main_timeout(15.0)):
                             raise RuntimeError("original firmware did not return as HGIC within 15 seconds")
                         self._q.put(("log", ("[*] waiting original firmware settle...", "stage")))
-                        time.sleep(5.0)
+                        time.sleep(main_timeout(5.0))
                         self._q.put(("log", ("[OK] original firmware is back online", "ok")))
 
                     if mode == "bin":
                         self._q.put(("log", ("[*] flash rnode-halow firmware", "stage")))
                         tar_p, td = make_minimal_ota_tar_from_bin(fw_path)
                         try:
-                            sess.flash(r.mac, tar_p, timeout=3.0, retries=5, progress_cb=cb_progress, retry_cb=cb_retry)
+                            sess.flash(r.mac, tar_p, timeout=main_timeout(5.0), retries=5, progress_cb=cb_progress, retry_cb=cb_retry)
                             self._q.put(("log", ("[OK] rnode-halow firmware flashed", "ok")))
                         finally:
                             try:
@@ -1099,29 +1131,40 @@ class App(tk.Tk):
                                 pass
 
                         self._q.put(("log", ("[*] reboot", "stage")))
-                        sess.reboot(r.mac, flags=0, count=3, period_sec=0.05)
+                        sess.reboot(r.mac, flags=0, count=3, period_sec=main_timeout(0.05))
                         self._q.put(("log", ("[OK] reboot sent", "ok")))
                         return
 
                     # mode == "ota"
                     self._q.put(("log", ("[*] flash rnode-halow firmware", "stage")))
-                    sess.flash(r.mac, fw_path, timeout=0.45, retries=5, progress_cb=cb_progress, retry_cb=cb_retry)
+                    sess.flash(r.mac, fw_path, timeout=main_timeout(5.45), retries=5, progress_cb=cb_progress, retry_cb=cb_retry)
                     self._q.put(("log", ("[OK] rnode-halow firmware flashed", "ok")))
 
                     self._q.put(("log", ("[*] reboot", "stage")))
-                    sess.reboot(r.mac, flags=0, count=3, period_sec=0.05)
+                    sess.reboot(r.mac, flags=0, count=3, period_sec=main_timeout(0.05))
 
                     if not has_www_dir:
                         self._q.put(("log", ("[OK] flash done", "ok")))
                         return
 
                     self._q.put(("log", ("[*] waiting IP…", "stage")))
-                    ip_s = self._wait_ip(sess, r.mac, overall_timeout_s=80.0)
+                    ip_s = self._wait_ip(sess, r.mac, overall_timeout_s=main_timeout(80.0))
                     if not ip_s:
                         self._q.put(("log", ("[ERR] IP not acquired (timeout).", "err")))
                         return
                     self._q.put(("devinfo", (r.key(), ip_s, "")))
 
+                    self._q.put(("log", ("[*] format LittleFS", "stage")))
+                    self._format_littlefs(sess, r.mac)
+                    self._q.put(("log", ("[OK] LittleFS formatted", "ok")))
+                    self._q.put(("log", ("[*] reboot after LittleFS format", "stage")))
+                    sess.reboot(r.mac, flags=0, count=3, period_sec=main_timeout(0.05))
+                    self._q.put(("log", ("[*] waiting IP after LittleFS format reboot…", "stage")))
+                    ip_s = self._wait_ip(sess, r.mac, overall_timeout_s=main_timeout(80.0))
+                    if not ip_s:
+                        self._q.put(("log", ("[ERR] IP not acquired after LittleFS format reboot (timeout).", "err")))
+                        return
+                    self._q.put(("devinfo", (r.key(), ip_s, "")))
                     self._q.put(("log", ("[*] upload filesystem via TFTP", "stage")))
                     sess.flash_fs(r.mac, fw_path, stage_cb=cb_stage, progress_cb=cb_progress)
                     self._q.put(("log", ("[OK] flash done", "ok")))
@@ -1132,6 +1175,42 @@ class App(tk.Tk):
         finally:
             self._q.put(("progress", (0.0, 0, 0, 0.0)))
             self._q.put(("busy", False))
+
+    def _format_littlefs(self, sess: HgicSession, mac: str) -> None:
+        dst_mac_s = str(mac or "").lower()
+        host_mac_s = str(sess.host_mac or "").lower()
+        payload = pack_format_littlefs_req()
+
+        def is_my_resp(p) -> bool:
+            if not p.haslayer(Ether) or not p.haslayer(Raw):
+                return False
+            eth = p[Ether]
+            if int(eth.type) != int(ETH_P_OTA):
+                return False
+            return (eth.src or "").lower() == dst_mac_s and (eth.dst or "").lower() == host_mac_s
+
+        frame = Ether(src=host_mac_s, dst=dst_mac_s, type=ETH_P_OTA) / Raw(load=payload)
+
+        for _ in range(3):
+            sn = AsyncSniffer(iface=sess.iface, store=True, lfilter=is_my_resp)
+            sn.start()
+            try:
+                sendp(frame, iface=sess.iface, verbose=False)
+                sn.join(timeout=main_timeout(15.0))
+            finally:
+                pkts = sn.stop() or []
+
+            for p in pkts:
+                status = parse_format_littlefs_resp_payload(bytes(p[Raw].load))
+                if status is None:
+                    continue
+                if status != 0:
+                    raise RuntimeError(f"LittleFS format failed: status={status}")
+                return
+
+            time.sleep(main_timeout(0.4))
+
+        raise RuntimeError("LittleFS format failed: timeout")
 
     def _reboot_selected(self) -> None:
         r = self._ensure_selected()
@@ -1155,33 +1234,33 @@ class App(tk.Tk):
                 with self._iface_lock(r.iface_id):
                     sess = HgicSession(r.iface_id)
                     self._q.put(("log", ("[*] reboot", "stage")))
-                    sess.reboot(r.mac, flags=0, count=3, period_sec=0.05)
+                    sess.reboot(r.mac, flags=0, count=3, period_sec=main_timeout(0.05))
                     self._q.put(("log", ("[OK] reboot sent", "ok")))
         except Exception as e:
             self._q.put(("log", (f"[ERR] reboot failed: {e}", "err")))
         finally:
             self._q.put(("busy", False))
 
-    def _wait_ip(self, sess: HgicSession, mac: str, *, overall_timeout_s: float = 60.0) -> Optional[str]:
+    def _wait_ip(self, sess: HgicSession, mac: str, *, overall_timeout_s: float = main_timeout(60.0)) -> Optional[str]:
         t0 = time.time()
         while time.time() - t0 < overall_timeout_s:
             try:
-                ans = sess.get_ip(mac, tries=1, timeout=0.5)
+                ans = sess.get_ip(mac, tries=1, timeout=main_timeout(0.5))
             except Exception:
                 ans = None
             if ans is not None:
                 ip_s = str(getattr(ans, "ip", "") or "")
                 if ip_s and ip_s != "0.0.0.0":
                     return ip_s
-            time.sleep(0.4)
+            time.sleep(main_timeout(0.4))
         return None
 
-    def _wait_hgic_ready(self, mac: str, iface_id: str, *, overall_timeout_s: float = 15.0) -> bool:
+    def _wait_hgic_ready(self, mac: str, iface_id: str, *, overall_timeout_s: float = main_timeout(15.0)) -> bool:
         mac = str(mac or "").lower()
         t0 = time.time()
         while time.time() - t0 < overall_timeout_s:
             try:
-                devs = scan_iface(iface_id, packet_cnt=6, period_sec=0.010, sniff_time=0.35)
+                devs = scan_iface(iface_id, packet_cnt=6, period_sec=main_timeout(0.010), sniff_time=main_timeout(0.35))
             except Exception:
                 devs = []
             for d in devs or []:
@@ -1189,7 +1268,7 @@ class App(tk.Tk):
                     continue
                 if not is_rnode_halow_by_scan(fmt_scan_ver(d)):
                     return True
-            time.sleep(0.20)
+            time.sleep(main_timeout(0.20))
         return False
 
     def _update_worker(self, r: DevRow, tar_path: Path) -> None:
@@ -1212,38 +1291,49 @@ class App(tk.Tk):
 
                     preflash_name = pick_preflash_firmware_name()
                     self._q.put(("log", (f'[*] flash original firmware "{preflash_name}"', "stage")))
-                    sess.flash(r.mac, read_builtin_firmware(preflash_name), timeout=0.45, retries=5, progress_cb=cb_progress, retry_cb=cb_retry)
+                    sess.flash(r.mac, read_builtin_firmware(preflash_name), timeout=main_timeout(5.45), retries=5, progress_cb=cb_progress, retry_cb=cb_retry)
                     self._q.put(("log", ("[OK] original firmware flashed", "ok")))
                     self._q.put(("log", ("[*] reboot original firmware", "stage")))
-                    sess.reboot(r.mac, flags=0, count=3, period_sec=0.05)
+                    sess.reboot(r.mac, flags=0, count=3, period_sec=main_timeout(0.05))
                     self._q.put(("log", ("[*] waiting original firmware reboot...", "stage")))
-                    if not self._wait_hgic_ready(r.mac, r.iface_id, overall_timeout_s=15.0):
+                    if not self._wait_hgic_ready(r.mac, r.iface_id, overall_timeout_s=main_timeout(15.0)):
                         raise RuntimeError("original firmware did not return as HGIC within 15 seconds")
                     self._q.put(("log", ("[*] waiting original firmware settle...", "stage")))
-                    time.sleep(5.0)
+                    time.sleep(main_timeout(5.0))
                     self._q.put(("log", ("[OK] original firmware is back online", "ok")))
 
                     # Stage 1: always flash firmware first via HGIC (fw.bin from ota.tar)
                     self._q.put(("log", ("[*] flash rnode-halow firmware", "stage")))
                     # slightly lower retries vs old GUI to avoid "unnecessary retries"
-                    sess.flash(r.mac, tar_path, timeout=0.45, retries=5, progress_cb=cb_progress, retry_cb=cb_retry)
+                    sess.flash(r.mac, tar_path, timeout=main_timeout(5.45), retries=5, progress_cb=cb_progress, retry_cb=cb_retry)
                     self._q.put(("log", ("[OK] rnode-halow firmware flashed", "ok")))
 
                     self._q.put(("log", ("[*] reboot", "stage")))
-                    sess.reboot(r.mac, flags=0, count=3, period_sec=0.05)
+                    sess.reboot(r.mac, flags=0, count=3, period_sec=main_timeout(0.05))
 
                     if not info.has_www_dir:
                         self._q.put(("log", ("[OK] flash done", "ok")))
                         return
 
                     self._q.put(("log", ("[*] waiting IP…", "stage")))
-                    ip_s = self._wait_ip(sess, r.mac, overall_timeout_s=80.0)
+                    ip_s = self._wait_ip(sess, r.mac, overall_timeout_s=main_timeout(80.0))
                     if not ip_s:
                         self._q.put(("log", ("[ERR] IP not acquired (timeout).", "err")))
                         return
                     self._q.put(("devinfo", (r.key(), ip_s, "")))
 
                     # Stage 2 (TFTP): upload filesystem files directly from ota.tar
+                    self._q.put(("log", ("[*] format LittleFS", "stage")))
+                    self._format_littlefs(sess, r.mac)
+                    self._q.put(("log", ("[OK] LittleFS formatted", "ok")))
+                    self._q.put(("log", ("[*] reboot after LittleFS format", "stage")))
+                    sess.reboot(r.mac, flags=0, count=3, period_sec=main_timeout(0.05))
+                    self._q.put(("log", ("[*] waiting IP after LittleFS format reboot…", "stage")))
+                    ip_s = self._wait_ip(sess, r.mac, overall_timeout_s=main_timeout(80.0))
+                    if not ip_s:
+                        self._q.put(("log", ("[ERR] IP not acquired after LittleFS format reboot (timeout).", "err")))
+                        return
+                    self._q.put(("devinfo", (r.key(), ip_s, "")))
                     self._q.put(("log", ("[*] upload filesystem via TFTP", "stage")))
                     sess.flash_fs(r.mac, tar_path, stage_cb=cb_stage, progress_cb=cb_progress)
                     self._q.put(("log", ("[OK] flash done", "ok")))
@@ -1271,13 +1361,13 @@ class App(tk.Tk):
 
                     if mode == "ota":
                         self._q.put(("log", ("[*] RAW flash (ota.tar)", "stage")))
-                        sess.flash(r.mac, fw_path, timeout=2.0, retries=5, progress_cb=cb_progress, retry_cb=cb_retry)
+                        sess.flash(r.mac, fw_path, timeout=main_timeout(5.0), retries=5, progress_cb=cb_progress, retry_cb=cb_retry)
                         self._q.put(("log", ("[OK] RAW flash done", "ok")))
                     else:
                         self._q.put(("log", ("[*] RAW flash (bin)", "stage")))
                         tar_p, td = make_minimal_ota_tar_from_bin(fw_path)
                         try:
-                            sess.flash(r.mac, tar_p, timeout=3.0, retries=5, progress_cb=cb_progress, retry_cb=cb_retry)
+                            sess.flash(r.mac, tar_p, timeout=main_timeout(5.0), retries=5, progress_cb=cb_progress, retry_cb=cb_retry)
                             self._q.put(("log", ("[OK] RAW flash done", "ok")))
                         finally:
                             try:
@@ -1287,7 +1377,7 @@ class App(tk.Tk):
 
 
                     self._q.put(("log", ("[*] reboot", "stage")))
-                    sess.reboot(r.mac, flags=0, count=3, period_sec=0.05)
+                    sess.reboot(r.mac, flags=0, count=3, period_sec=main_timeout(0.05))
                     self._q.put(("log", ("[OK] reboot sent", "ok")))
         except Exception as e:
             self._q.put(("log", (f"[ERR] RAW flash failed: {e}", "err")))

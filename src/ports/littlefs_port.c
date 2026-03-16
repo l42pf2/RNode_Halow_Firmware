@@ -27,10 +27,6 @@
 
 extern struct spi_nor_flash flash0;
 
-#ifndef LFS_PART_NAME
-#define LFS_PART_NAME           "littlefs"
-#endif
-
 #ifndef LFS_READ_SIZE
 #define LFS_READ_SIZE           256U
 #endif
@@ -165,7 +161,7 @@ static void lfs_cfg_setup (void){
 int32_t littlefs_init(void){
     int err;
 
-    g_part = fal_partition_find(LFS_PART_NAME);
+    g_part = fal_partition_find(FAL_PART_NAME_LITTLEFS);
     if (g_part == NULL) {
         return -1;
     }
