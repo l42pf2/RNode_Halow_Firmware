@@ -165,19 +165,53 @@ static int32 sys_blink_work(struct os_work *work) {
     return 0;
 }
 
+bool boot_recovery_check( void ){
+    uint32_t t = 0;
+    bool led = false;
+
+    if (!button_get()) {
+        false;
+    }
+
+    while (button_get()) {
+        os_sleep_ms(50);
+        t += 50;
+        if (t >= 3000 && t < 10000) {
+            led = !led;
+            indication_led_main_set(led);
+            os_sleep_ms(100);
+            t += 100;
+        }
+
+        if (t >= 10000) {
+            indication_led_main_set(true);
+            return true;
+        }
+    }
+
+    indication_led_main_set(false);
+
+    if (t >= 3000 && t < 10000) {
+        ota_reset_to_default();
+        device_reboot();
+    }
+    return false;
+}
+
 __init int main(void) {
     extern uint32 __sinit, __einit;
     mcu_watchdog_timeout(5);
-    
+    sys_event_init(32);
+    sys_event_take(0xffffffff, sys_event_hdl, 0);
     indication_init();
     fal_init();
-    //ota_reset_to_default();
+    if(boot_recovery_check()){
+        sys_network_init();
+        return 0;
+    }
     configdb_init();
     littlefs_init();
     boot_counter_update();
-    sys_event_init(32);
-    sys_event_take(0xffffffff, sys_event_hdl, 0);
-
     skbpool_init(SKB_POOL_ADDR, (uint32)SKB_POOL_SIZE, 90, 0);
     halow_init(WIFI_RX_BUFF_ADDR, WIFI_RX_BUFF_SIZE, TDMA_BUFF_ADDR, TDMA_BUFF_SIZE);
     halow_lbt_init();

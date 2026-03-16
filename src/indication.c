@@ -16,6 +16,8 @@ static int32 sys_blink_work(struct os_work *work) {
 
 void indication_init(void){
     OS_WORK_INIT(&led_rx_wk, sys_blink_work,0);
+    gpio_set_dir(BUTTON_PIN, GPIO_DIR_INPUT);
+    gpio_set_mode(BUTTON_PIN, GPIO_PULL_UP, GPIO_PULL_LEVEL_10K);
 
     gpio_set_dir(INDICATION_LED_CONNECT_PIN, GPIO_DIR_OUTPUT);
     gpio_set_dir(INDICATION_LED_RSSI1_PIN, GPIO_DIR_OUTPUT);
@@ -25,6 +27,10 @@ void indication_init(void){
     gpio_set_val(INDICATION_LED_RSSI1_PIN, 1);
     gpio_set_val(INDICATION_LED_RSSI2_PIN, 1);
     gpio_set_val(INDICATION_LED_RSSI3_PIN, 1);
+}
+
+bool button_get(void){
+    return gpio_get_val(BUTTON_PIN) == 0;
 }
 
 void indication_led_main_set(bool state){

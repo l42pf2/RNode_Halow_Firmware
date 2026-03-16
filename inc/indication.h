@@ -7,5 +7,6 @@ void indication_init(void);
 void indication_led_main_set(bool state);
 void indication_led_rx(void);
 void indication_led_tx_set(bool state);
+bool button_get(void);
 
 #endif // __INDICATION_H__
