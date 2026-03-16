@@ -222,6 +222,13 @@ void halow_config_set_mcs(uint8_t mcs){
     halow_debug("GET MCS: %d", lmac_get_tx_mcs(g_ops));
 }
 
+void halow_config_set_bandwidth(uint8_t bw){
+    lmac_set_bss_bw(g_ops, bw);
+    lmac_set_mcast_txbw(g_ops, bw);
+    lmac_set_tx_bw(g_ops, bw);
+    halow_debug("GET BW: %d", lmac_get_tx_bw(g_ops));
+}
+
 void halow_config_apply(const halow_config_t *cfg){
     halow_config_t halow_cfg;
     if (cfg == NULL) { 
@@ -234,10 +241,10 @@ void halow_config_apply(const halow_config_t *cfg){
     halow_cfg = *cfg;
     halow_cfg_sanitize(&halow_cfg);
     lmac_set_freq(g_ops, halow_cfg.central_freq);
-    lmac_set_bss_bw(g_ops, halow_cfg.bandwidth);
 
     /* ---- PHY rate control ---- */
     halow_config_set_mcs(halow_cfg.mcs);
+    halow_config_set_bandwidth(halow_cfg.bandwidth);
 	
     /* ---- power ---- */
     lmac_set_txpower(g_ops, halow_cfg.rf_power);
@@ -256,10 +263,10 @@ static void halow_modem_set_default(void){
 
     /* ---- RF / channel ---- */
     lmac_set_freq(g_ops, HALOW_CONFIG_CENTRAL_FREQ_DEF);
-    lmac_set_bss_bw(g_ops, HALOW_CONFIG_BANDWIDTH_DEF);
 
     /* ---- PHY rate control ---- */
     halow_config_set_mcs(HALOW_CONFIG_MCS_DEF);
+    halow_config_set_bandwidth(HALOW_CONFIG_BANDWIDTH_DEF);
 	
     /* ---- power ---- */
     lmac_set_txpower(g_ops, HALOW_CONFIG_POWER_DEF);
