@@ -438,6 +438,7 @@ void halow_lbt_task( void *arg ){
 #endif
 
         (void)os_mutex_unlock(&g_lbt_ctx_mutex);
+		os_sleep_ms(1);
     }
 }
 
