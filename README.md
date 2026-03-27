@@ -248,4 +248,9 @@ IP адресс можно узнать через DHCP сервер на роу
 Прошивка для OTA генерируется автоматически project/out/XXX.tar после сборки проекта.
 
 автоматически `project/out/XXX.tar` после сборки проекта.
-```
+
+## Support
+
+USDT (TON) `EQCPUzAUHbm7M_6tYwQhC7DGNMpouiR_SY-6Bw_FguEaVZZp`
+
+Litecoin `LSzupUjU2WtMAXkrE87icEJHaQes7JaXqA`
