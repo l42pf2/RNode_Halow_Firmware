@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from scapy.all import Ether, Raw  # type: ignore
+from scapy.all import AsyncSniffer, Ether, Raw  # type: ignore
 
 from .hgic_device import HgicDevice
 from .hgic_ota import (
@@ -78,7 +78,44 @@ class HgicFlasher:
 
         return got
 
+    def _send_and_wait_fw_ack(self, *, dev_mac: str, payload: bytes, timeout_s: float) -> Optional[FwAck]:
+        dev_mac  = parse_mac(dev_mac)
+        host_mac = (self.dev.host_mac or "").lower()
+        got: Optional[FwAck] = None
 
+        def want_pkt(p) -> bool:
+            nonlocal got
+            if not p.haslayer(Ether) or not p.haslayer(Raw):
+                return False
+            eth = p[Ether]
+            if eth.type != ETH_P_OTA:
+                return False
+            if (eth.src or "").lower() != dev_mac:
+                return False
+            if (eth.dst or "").lower() != host_mac:
+                return False
+            ack = parse_fw_ack_payload(bytes(p[Raw].load))
+            if not ack:
+                return False
+            got = ack
+            return True
+
+        bpf = f"ether proto {ETH_P_OTA:#x} and ether src {dev_mac} and ether dst {host_mac}"
+        sniffer = AsyncSniffer(
+            iface=self.dev.iface,
+            filter=bpf,
+            store=False,
+            stop_filter=want_pkt,
+        )
+        sniffer.start()
+        try:
+            self.dev.send(dst_mac=dev_mac, payload=payload)
+            sniffer.join(timeout=float(timeout_s))
+        finally:
+            if sniffer.running:
+                sniffer.stop(join=False)
+
+        return got
 
     def flash_firmware(
         self,
@@ -128,8 +165,9 @@ class HgicFlasher:
             ok = False
 
             for _ in range(retries):
-                self.dev.send(dst_mac=dev_mac, payload=payload)
-                ack = self._wait_fw_ack(dev_mac=dev_mac, timeout_s=timeout)
+                # self.dev.send(dst_mac=dev_mac, payload=payload)
+                # ack = self._wait_fw_ack(dev_mac=dev_mac, timeout_s=timeout)
+                ack = self._send_and_wait_fw_ack(dev_mac=dev_mac, payload=payload, timeout_s=timeout)
                 if not ack:
                     continue
 
